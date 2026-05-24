@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Yacht {
+  id        Int      @id @default(autoincrement())
+  name      String
+  marina    String?
+  berth     String?
+  chefName  String?
+  phone     String?
+  notes     String?
+  vipLevel  String?  @default("Standard")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders    Order[]
+}
+
+model Product {
+  id        Int      @id @default(autoincrement())
+  name      String
+  category  String?
+  unit      String?  @default("kg")
+  price     Float?
+  notes     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items     OrderItem[]
+}
+
+model Order {
+  id          Int         @id @default(autoincrement())
+  yachtId     Int
+  status      String      @default("pending")
+  priority    String      @default("normal")
+  deliveryAt  DateTime?
+  deliveryNote String?
+  notes       String?
+  total       Float?
+  invoiceStatus String    @default("pending")
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  yacht       Yacht       @relation(fields: [yachtId], references: [id], onDelete: Cascade)
+  items       OrderItem[]
+}
+
+model OrderItem {
+  id         Int      @id @default(autoincrement())
+  orderId    Int
+  productId  Int
+  quantity   Float
+  unit       String?  @default("kg")
+  price      Float?
+  notes      String?
+
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product    Product  @relation(fields: [productId], references: [id])
+}
