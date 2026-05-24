@@ -11,7 +11,7 @@ const prisma = new PrismaClient();
 const app = express();
 
 app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 8080;
 const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME_IN_RAILWAY";
@@ -55,22 +55,18 @@ async function auth(req, res, next) {
     const payload = jwt.verify(token, JWT_SECRET);
     const user = await prisma.user.findUnique({ where: { id: Number(payload.id) } });
 
-    if (!user || !user.active) {
-      return res.status(401).json({ ok: false, error: "Invalid or inactive user" });
-    }
+    if (!user || !user.active) return res.status(401).json({ ok: false, error: "Invalid or inactive user" });
 
     req.user = user;
     next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ ok: false, error: "Invalid auth token" });
   }
 }
 
 function requireRole(...roles) {
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ ok: false, error: "Insufficient permissions" });
-    }
+    if (!roles.includes(req.user.role)) return res.status(403).json({ ok: false, error: "Insufficient permissions" });
     next();
   };
 }
@@ -106,18 +102,6 @@ async function orderEvent(orderId, status, message, createdBy) {
   }
 }
 
-function calculateTotals(items) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0);
-  const vat = Number((subtotal * VAT_RATE).toFixed(2));
-  const total = Number((subtotal + vat).toFixed(2));
-
-  return {
-    subtotal: Number(subtotal.toFixed(2)),
-    vat,
-    total
-  };
-}
-
 function orderInclude() {
   return {
     yacht: true,
@@ -126,8 +110,33 @@ function orderInclude() {
   };
 }
 
+function calculateTotals(items) {
+  const subtotal = items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0);
+  const vat = Number((subtotal * VAT_RATE).toFixed(2));
+  const total = Number((subtotal + vat).toFixed(2));
+  return { subtotal: Number(subtotal.toFixed(2)), vat, total };
+}
+
+function orderDeliveryData(body, yacht) {
+  return {
+    contactName: body.contactName || yacht?.chefName || null,
+    contactPhone: body.contactPhone || yacht?.phone || null,
+    deliveryLocation: body.deliveryLocation || yacht?.marina || null,
+    deliveryBerth: body.deliveryBerth || yacht?.berth || null,
+    deliveryMapUrl: body.deliveryMapUrl || null,
+    deliveryNotes: body.deliveryNotes || null
+  };
+}
+
+async function getFullOrder(id) {
+  return prisma.order.findUnique({
+    where: { id: Number(id) },
+    include: orderInclude()
+  });
+}
+
 app.get("/", (req, res) => {
-  res.json({ ok: true, app: "YachtFlow API", version: "2.1.0" });
+  res.json({ ok: true, app: "YachtFlow API", version: "2.2.0" });
 });
 
 app.get("/health", async (req, res) => {
@@ -142,25 +151,15 @@ app.get("/health", async (req, res) => {
 app.post("/auth/setup-admin", async (req, res) => {
   try {
     const existingUsers = await prisma.user.count();
+    if (existingUsers > 0) return res.status(409).json({ ok: false, error: "Admin already exists" });
 
-    if (existingUsers > 0) {
-      return res.status(409).json({ ok: false, error: "Admin already exists" });
-    }
-
-    if (!SETUP_SECRET) {
-      return res.status(500).json({ ok: false, error: "SETUP_SECRET is missing in Railway variables" });
-    }
-
-    if (req.body.setupSecret !== SETUP_SECRET) {
-      return res.status(401).json({ ok: false, error: "Invalid setup secret" });
-    }
-
+    if (!SETUP_SECRET) return res.status(500).json({ ok: false, error: "SETUP_SECRET is missing in Railway variables" });
+    if (req.body.setupSecret !== SETUP_SECRET) return res.status(401).json({ ok: false, error: "Invalid setup secret" });
     if (!req.body.email || !req.body.password || !req.body.name) {
       return res.status(400).json({ ok: false, error: "name, email and password are required" });
     }
 
     const passwordHash = await bcrypt.hash(req.body.password, 10);
-
     const user = await prisma.user.create({
       data: {
         name: req.body.name,
@@ -181,19 +180,14 @@ app.post("/auth/login", async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
     const password = String(req.body.password || "");
-
     const user = await prisma.user.findUnique({ where: { email } });
 
-    if (!user || !user.active) {
-      return res.status(401).json({ ok: false, error: "Invalid login" });
-    }
+    if (!user || !user.active) return res.status(401).json({ ok: false, error: "Invalid login" });
 
     const valid = await bcrypt.compare(password, user.passwordHash);
-
     if (!valid) return res.status(401).json({ ok: false, error: "Invalid login" });
 
     await audit({ user }, "login", "User", user.id);
-
     res.json({ ok: true, user: publicUser(user), token: signToken(user) });
   } catch (error) {
     sendError(res, error);
@@ -220,7 +214,6 @@ app.post("/users", auth, requireRole("admin"), async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(req.body.password, 10);
-
     const user = await prisma.user.create({
       data: {
         name: req.body.name,
@@ -322,7 +315,12 @@ app.post("/products", auth, requireRole("admin", "ops"), async (req, res) => {
 
 app.get("/orders", auth, async (req, res) => {
   try {
+    const where = {};
+    if (req.query.status) where.status = String(req.query.status);
+    if (req.query.paymentStatus) where.paymentStatus = String(req.query.paymentStatus);
+
     const orders = await prisma.order.findMany({
+      where,
       include: orderInclude(),
       orderBy: { createdAt: "desc" }
     });
@@ -335,20 +333,11 @@ app.get("/orders", auth, async (req, res) => {
 app.post("/orders", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const items = Array.isArray(req.body.items) ? req.body.items : [];
-
-    if (!req.body.yachtId) {
-      return res.status(400).json({ ok: false, error: "yachtId is required" });
-    }
-
-    if (items.length === 0) {
-      return res.status(400).json({ ok: false, error: "At least one order item is required" });
-    }
+    if (!req.body.yachtId) return res.status(400).json({ ok: false, error: "yachtId is required" });
+    if (items.length === 0) return res.status(400).json({ ok: false, error: "At least one order item is required" });
 
     const yacht = await prisma.yacht.findUnique({ where: { id: Number(req.body.yachtId) } });
-
-    if (!yacht) {
-      return res.status(404).json({ ok: false, error: "Yacht not found" });
-    }
+    if (!yacht) return res.status(404).json({ ok: false, error: "Yacht not found" });
 
     const order = await prisma.order.create({
       data: {
@@ -356,14 +345,7 @@ app.post("/orders", auth, requireRole("admin", "ops"), async (req, res) => {
         status: req.body.status || "confirmed",
         deliveryAt: req.body.deliveryAt ? new Date(req.body.deliveryAt) : null,
         notes: req.body.notes || null,
-
-        contactName: req.body.contactName || yacht.chefName || null,
-        contactPhone: req.body.contactPhone || yacht.phone || null,
-        deliveryLocation: req.body.deliveryLocation || yacht.marina || null,
-        deliveryBerth: req.body.deliveryBerth || yacht.berth || null,
-        deliveryMapUrl: req.body.deliveryMapUrl || null,
-        deliveryNotes: req.body.deliveryNotes || null,
-
+        ...orderDeliveryData(req.body, yacht),
         paymentStatus: "pending",
         ticketSent: false,
         items: {
@@ -391,9 +373,134 @@ app.post("/orders", auth, requireRole("admin", "ops"), async (req, res) => {
   }
 });
 
+app.patch("/orders/:id", auth, requireRole("admin", "ops"), async (req, res) => {
+  try {
+    const current = await prisma.order.findUnique({
+      where: { id: Number(req.params.id) },
+      include: { items: true, yacht: true }
+    });
+
+    if (!current) return res.status(404).json({ ok: false, error: "Order not found" });
+
+    const updateData = {
+      status: req.body.status || current.status,
+      deliveryAt: req.body.deliveryAt ? new Date(req.body.deliveryAt) : current.deliveryAt,
+      notes: req.body.notes ?? current.notes,
+      contactName: req.body.contactName ?? current.contactName,
+      contactPhone: req.body.contactPhone ?? current.contactPhone,
+      deliveryLocation: req.body.deliveryLocation ?? current.deliveryLocation,
+      deliveryBerth: req.body.deliveryBerth ?? current.deliveryBerth,
+      deliveryMapUrl: req.body.deliveryMapUrl ?? current.deliveryMapUrl,
+      deliveryNotes: req.body.deliveryNotes ?? current.deliveryNotes
+    };
+
+    const items = Array.isArray(req.body.items) ? req.body.items : null;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: Number(req.params.id) },
+        data: updateData
+      });
+
+      if (items) {
+        await tx.orderItem.deleteMany({ where: { orderId: Number(req.params.id) } });
+        await tx.orderItem.createMany({
+          data: items.map((item) => ({
+            orderId: Number(req.params.id),
+            productId: Number(item.productId),
+            quantity: Number(item.quantity),
+            notes: item.notes || null
+          }))
+        });
+
+        await tx.order.update({
+          where: { id: Number(req.params.id) },
+          data: {
+            subtotal: null,
+            vat: null,
+            total: null,
+            paymentStatus: "pending",
+            ticketSent: false
+          }
+        });
+      }
+    });
+
+    await orderEvent(req.params.id, "edited", "Order edited", req.user.name);
+    await audit(req, "edit_order", "Order", req.params.id, { itemsChanged: Boolean(items) });
+
+    res.json(await getFullOrder(req.params.id));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/orders/:id/repeat", auth, requireRole("admin", "ops"), async (req, res) => {
+  try {
+    const original = await getFullOrder(req.params.id);
+    if (!original) return res.status(404).json({ ok: false, error: "Order not found" });
+
+    const order = await prisma.order.create({
+      data: {
+        yachtId: original.yachtId,
+        status: "confirmed",
+        deliveryAt: req.body.deliveryAt ? new Date(req.body.deliveryAt) : null,
+        notes: req.body.notes || `Repeat of order #${original.id}`,
+        contactName: original.contactName,
+        contactPhone: original.contactPhone,
+        deliveryLocation: original.deliveryLocation,
+        deliveryBerth: original.deliveryBerth,
+        deliveryMapUrl: original.deliveryMapUrl,
+        deliveryNotes: original.deliveryNotes,
+        paymentStatus: "pending",
+        ticketSent: false,
+        items: {
+          create: original.items.map((item) => ({
+            productId: item.productId,
+            quantity: item.quantity,
+            notes: item.notes
+          }))
+        },
+        events: {
+          create: {
+            status: "confirmed",
+            message: `Repeated from order #${original.id}`,
+            createdBy: req.user.name
+          }
+        }
+      },
+      include: orderInclude()
+    });
+
+    await audit(req, "repeat_order", "Order", order.id, { fromOrder: original.id });
+    res.status(201).json(order);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.patch("/orders/:id/cancel", auth, requireRole("admin", "ops"), async (req, res) => {
+  try {
+    await prisma.order.update({
+      where: { id: Number(req.params.id) },
+      data: {
+        status: "cancelled",
+        completedAt: new Date()
+      }
+    });
+
+    await orderEvent(req.params.id, "cancelled", req.body.reason || "Order cancelled", req.user.name);
+    await audit(req, "cancel_order", "Order", req.params.id, { reason: req.body.reason || null });
+
+    res.json(await getFullOrder(req.params.id));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 app.patch("/orders/:id/delivery", auth, requireRole("admin", "ops", "driver"), async (req, res) => {
   try {
-    const order = await prisma.order.update({
+    await prisma.order.update({
       where: { id: Number(req.params.id) },
       data: {
         contactName: req.body.contactName || null,
@@ -402,24 +509,13 @@ app.patch("/orders/:id/delivery", auth, requireRole("admin", "ops", "driver"), a
         deliveryBerth: req.body.deliveryBerth || null,
         deliveryMapUrl: req.body.deliveryMapUrl || null,
         deliveryNotes: req.body.deliveryNotes || null
-      },
-      include: orderInclude()
+      }
     });
 
-    await orderEvent(order.id, "delivery_updated", "Delivery contact/location updated", req.user.name);
-    await audit(req, "update_order_delivery", "Order", order.id, {
-      contactName: order.contactName,
-      contactPhone: order.contactPhone,
-      deliveryLocation: order.deliveryLocation,
-      deliveryBerth: order.deliveryBerth
-    });
+    await orderEvent(req.params.id, "delivery_updated", "Delivery contact/location updated", req.user.name);
+    await audit(req, "update_order_delivery", "Order", req.params.id);
 
-    const fullOrder = await prisma.order.findUnique({
-      where: { id: order.id },
-      include: orderInclude()
-    });
-
-    res.json(fullOrder);
+    res.json(await getFullOrder(req.params.id));
   } catch (error) {
     sendError(res, error);
   }
@@ -430,10 +526,7 @@ app.patch("/orders/:id/status", auth, requireRole("admin", "ops", "driver"), asy
     const status = req.body.status;
 
     if (req.user.role === "driver" && !["out_for_delivery", "delivered"].includes(status)) {
-      return res.status(403).json({
-        ok: false,
-        error: "Driver can only set out_for_delivery or delivered"
-      });
+      return res.status(403).json({ ok: false, error: "Driver can only set out_for_delivery or delivered" });
     }
 
     await prisma.order.update({
@@ -447,12 +540,7 @@ app.patch("/orders/:id/status", auth, requireRole("admin", "ops", "driver"), asy
     await orderEvent(req.params.id, status, `Status changed to ${status}`, req.user.name);
     await audit(req, "update_order_status", "Order", req.params.id, { status });
 
-    const fullOrder = await prisma.order.findUnique({
-      where: { id: Number(req.params.id) },
-      include: orderInclude()
-    });
-
-    res.json(fullOrder);
+    res.json(await getFullOrder(req.params.id));
   } catch (error) {
     sendError(res, error);
   }
@@ -461,25 +549,15 @@ app.patch("/orders/:id/status", auth, requireRole("admin", "ops", "driver"), asy
 app.patch("/orders/:id/prepare", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const inputItems = Array.isArray(req.body.items) ? req.body.items : [];
-
     const preparedItems = inputItems.map((item) => {
       const actualWeight = Number(item.actualWeight || 0);
       const customPrice = Number(item.customPrice || 0);
       const lineTotal = Number((actualWeight * customPrice).toFixed(2));
-
-      return {
-        id: Number(item.id),
-        actualWeight,
-        customPrice,
-        lineTotal
-      };
+      return { id: Number(item.id), actualWeight, customPrice, lineTotal };
     });
 
     if (preparedItems.some((item) => !item.id || !item.actualWeight || !item.customPrice)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Every item needs id, actualWeight and customPrice"
-      });
+      return res.status(400).json({ ok: false, error: "Every item needs id, actualWeight and customPrice" });
     }
 
     const totals = calculateTotals(preparedItems);
@@ -510,12 +588,7 @@ app.patch("/orders/:id/prepare", auth, requireRole("admin", "ops"), async (req, 
     await orderEvent(req.params.id, "ready", `Order prepared. Total €${totals.total}`, req.user.name);
     await audit(req, "prepare_order", "Order", req.params.id, totals);
 
-    const order = await prisma.order.findUnique({
-      where: { id: Number(req.params.id) },
-      include: orderInclude()
-    });
-
-    res.json(order);
+    res.json(await getFullOrder(req.params.id));
   } catch (error) {
     sendError(res, error);
   }
@@ -524,7 +597,6 @@ app.patch("/orders/:id/prepare", auth, requireRole("admin", "ops"), async (req, 
 app.patch("/orders/:id/payment", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const paymentStatus = req.body.paymentStatus || "paid";
-
     await prisma.order.update({
       where: { id: Number(req.params.id) },
       data: { paymentStatus }
@@ -533,12 +605,7 @@ app.patch("/orders/:id/payment", auth, requireRole("admin", "ops"), async (req, 
     await orderEvent(req.params.id, paymentStatus, `Payment status: ${paymentStatus}`, req.user.name);
     await audit(req, "update_payment", "Order", req.params.id, { paymentStatus });
 
-    const order = await prisma.order.findUnique({
-      where: { id: Number(req.params.id) },
-      include: orderInclude()
-    });
-
-    res.json(order);
+    res.json(await getFullOrder(req.params.id));
   } catch (error) {
     sendError(res, error);
   }
@@ -554,12 +621,7 @@ app.patch("/orders/:id/ticket-sent", auth, requireRole("admin", "ops"), async (r
     await orderEvent(req.params.id, "ticket_sent", "WhatsApp payment ticket sent", req.user.name);
     await audit(req, "ticket_sent", "Order", req.params.id);
 
-    const order = await prisma.order.findUnique({
-      where: { id: Number(req.params.id) },
-      include: orderInclude()
-    });
-
-    res.json(order);
+    res.json(await getFullOrder(req.params.id));
   } catch (error) {
     sendError(res, error);
   }
@@ -568,7 +630,10 @@ app.patch("/orders/:id/ticket-sent", auth, requireRole("admin", "ops"), async (r
 app.get("/analytics/revenue", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { total: { not: null } },
+      where: {
+        total: { not: null },
+        status: { not: "cancelled" }
+      },
       include: {
         yacht: true,
         items: { include: { product: true } }
@@ -593,11 +658,9 @@ app.get("/analytics/revenue", auth, requireRole("admin", "ops"), async (req, res
 
     const yachtRevenue = {};
     const productRevenue = {};
-
     for (const order of orders) {
       const yachtName = order.yacht?.name || "Unknown";
       yachtRevenue[yachtName] = (yachtRevenue[yachtName] || 0) + Number(order.total || 0);
-
       for (const item of order.items || []) {
         const productName = item.product?.name || "Unknown";
         productRevenue[productName] = (productRevenue[productName] || 0) + Number(item.lineTotal || 0);
