@@ -15,7 +15,6 @@ model Yacht {
   chefName  String?
   phone     String?
   notes     String?
-  vipLevel  String?  @default("Standard")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -26,10 +25,9 @@ model Product {
   id        Int      @id @default(autoincrement())
   name      String
   category  String?
-  unit      String?  @default("kg")
+  unit      String?
   price     Float?
   notes     String?
-  active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -40,12 +38,9 @@ model Order {
   id          Int         @id @default(autoincrement())
   yachtId     Int
   status      String      @default("pending")
-  priority    String      @default("normal")
   deliveryAt  DateTime?
-  deliveryNote String?
   notes       String?
   total       Float?
-  invoiceStatus String    @default("pending")
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
@@ -58,8 +53,6 @@ model OrderItem {
   orderId    Int
   productId  Int
   quantity   Float
-  unit       String?  @default("kg")
-  price      Float?
   notes      String?
 
   order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)

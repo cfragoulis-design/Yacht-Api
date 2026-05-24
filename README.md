@@ -1,84 +1,48 @@
 # YachtFlow API
 
-Backend API για το YachtFlow: κρεοπωλείο + yacht/chef παραγγελίες.
+Backend API για κρεοπωλείο + yacht order operations.
 
-## Railway deploy
+## Railway settings
 
-1. Δημιούργησε νέο GitHub repo: `yachtflow-api`
-2. Ανέβασε όλα τα αρχεία αυτού του φακέλου.
-3. Railway → New Service → Deploy from GitHub repo.
-4. Στο API service → Variables βάλε:
-
+Variables:
 ```env
-DATABASE_URL=το DATABASE_URL από το Railway Postgres
+DATABASE_URL=your_railway_postgres_url
 ```
 
-5. Settings → Deploy:
-
-```bash
-Build Command: npm install && npx prisma generate && npx prisma db push
-Start Command: npm run start
-```
-
-6. Generate Domain.
-
-## Local development
-
+Build Command:
 ```bash
 npm install
-cp .env.example .env
-npx prisma db push
-npm run db:seed
-npm run dev
 ```
 
-## Endpoints
+Pre-Deploy Command:
+```bash
+npx prisma db push
+```
+
+Start Command:
+```bash
+npm start
+```
+
+Public Networking Port:
+```txt
+8080
+```
+
+## Test URLs
 
 ```txt
-GET    /health
-GET    /yachts
-POST   /yachts
-PUT    /yachts/:id
-DELETE /yachts/:id
-
-GET    /products
-POST   /products
-PUT    /products/:id
-
-GET    /orders
-GET    /orders/:id
-POST   /orders
-PUT    /orders/:id
-PUT    /orders/:id/status
+/
+ /health
+ /yachts
+ /products
+ /orders
 ```
 
-## Example create yacht
+## Seed data
 
-```json
-{
-  "name": "M/Y Serenity",
-  "marina": "Gouvia Marina",
-  "berth": "D-42",
-  "chefName": "John Carter",
-  "phone": "+30 694 000 1122",
-  "vipLevel": "Platinum",
-  "notes": "Premium meat client. Vacuum packed."
-}
-```
+Run locally or from Railway shell:
 
-## Example create order
-
-```json
-{
-  "yachtId": 1,
-  "status": "pending",
-  "priority": "urgent",
-  "deliveryAt": "2026-05-25T18:00:00.000Z",
-  "deliveryNote": "Deliver stern side",
-  "notes": "Chef requested thick cuts",
-  "items": [
-    { "productId": 1, "quantity": 4, "unit": "pcs", "notes": "1.2kg each" },
-    { "productId": 5, "quantity": 4, "unit": "kg" }
-  ]
-}
+```bash
+npm run db:seed
 ```
