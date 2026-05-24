@@ -15,7 +15,7 @@ model User {
   role         String       @default("ops")
   active       Boolean      @default(true)
   createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  updatedAt    DateTime     @default(now()) @updatedAt
 
   auditEvents  AuditEvent[]
 }
@@ -29,7 +29,7 @@ model Yacht {
   phone     String?
   notes     String?
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   orders    Order[]
 }
@@ -43,7 +43,7 @@ model Product {
   notes     String?
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   items     OrderItem[]
 }
@@ -55,8 +55,6 @@ model Order {
   deliveryAt       DateTime?
   notes            String?
 
-  // Order-specific contact/location snapshot.
-  // Chefs, phone numbers and yacht locations change often, so each order keeps its own delivery details.
   contactName      String?
   contactPhone     String?
   deliveryLocation String?
@@ -71,7 +69,7 @@ model Order {
   ticketSent       Boolean      @default(false)
   completedAt      DateTime?
   createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  updatedAt        DateTime     @default(now()) @updatedAt
 
   yacht            Yacht        @relation(fields: [yachtId], references: [id], onDelete: Cascade)
   items            OrderItem[]
