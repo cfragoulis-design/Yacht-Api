@@ -35,26 +35,34 @@ model Product {
 }
 
 model Order {
-  id          Int         @id @default(autoincrement())
-  yachtId     Int
-  status      String      @default("pending")
-  deliveryAt  DateTime?
-  notes       String?
-  total       Float?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  id            Int         @id @default(autoincrement())
+  yachtId       Int
+  status        String      @default("pending")
+  deliveryAt    DateTime?
+  notes         String?
+  subtotal      Float?
+  vat           Float?
+  total         Float?
+  paymentStatus String      @default("pending")
+  ticketSent    Boolean     @default(false)
+  completedAt   DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
-  yacht       Yacht       @relation(fields: [yachtId], references: [id], onDelete: Cascade)
-  items       OrderItem[]
+  yacht         Yacht       @relation(fields: [yachtId], references: [id], onDelete: Cascade)
+  items         OrderItem[]
 }
 
 model OrderItem {
-  id         Int      @id @default(autoincrement())
-  orderId    Int
-  productId  Int
-  quantity   Float
-  notes      String?
+  id           Int      @id @default(autoincrement())
+  orderId      Int
+  productId    Int
+  quantity     Float
+  actualWeight Float?
+  customPrice  Float?
+  lineTotal    Float?
+  notes        String?
 
-  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product    Product  @relation(fields: [productId], references: [id])
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product      Product  @relation(fields: [productId], references: [id])
 }
