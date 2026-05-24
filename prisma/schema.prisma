@@ -49,23 +49,33 @@ model Product {
 }
 
 model Order {
-  id            Int          @id @default(autoincrement())
-  yachtId       Int
-  status        String       @default("pending")
-  deliveryAt    DateTime?
-  notes         String?
-  subtotal      Float?
-  vat           Float?
-  total         Float?
-  paymentStatus String       @default("pending")
-  ticketSent    Boolean      @default(false)
-  completedAt   DateTime?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  id               Int          @id @default(autoincrement())
+  yachtId          Int
+  status           String       @default("pending")
+  deliveryAt       DateTime?
+  notes            String?
 
-  yacht         Yacht        @relation(fields: [yachtId], references: [id], onDelete: Cascade)
-  items         OrderItem[]
-  events        OrderEvent[]
+  // Order-specific contact/location snapshot.
+  // Chefs, phone numbers and yacht locations change often, so each order keeps its own delivery details.
+  contactName      String?
+  contactPhone     String?
+  deliveryLocation String?
+  deliveryBerth    String?
+  deliveryMapUrl   String?
+  deliveryNotes    String?
+
+  subtotal         Float?
+  vat              Float?
+  total            Float?
+  paymentStatus    String       @default("pending")
+  ticketSent       Boolean      @default(false)
+  completedAt      DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  yacht            Yacht        @relation(fields: [yachtId], references: [id], onDelete: Cascade)
+  items            OrderItem[]
+  events           OrderEvent[]
 }
 
 model OrderItem {
