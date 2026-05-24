@@ -35,22 +35,23 @@ model Product {
 }
 
 model Order {
-  id            Int         @id @default(autoincrement())
+  id            Int          @id @default(autoincrement())
   yachtId       Int
-  status        String      @default("pending")
+  status        String       @default("pending")
   deliveryAt    DateTime?
   notes         String?
   subtotal      Float?
   vat           Float?
   total         Float?
-  paymentStatus String      @default("pending")
-  ticketSent    Boolean     @default(false)
+  paymentStatus String       @default("pending")
+  ticketSent    Boolean      @default(false)
   completedAt   DateTime?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
-  yacht         Yacht       @relation(fields: [yachtId], references: [id], onDelete: Cascade)
+  yacht         Yacht        @relation(fields: [yachtId], references: [id], onDelete: Cascade)
   items         OrderItem[]
+  events        OrderEvent[]
 }
 
 model OrderItem {
@@ -65,4 +66,14 @@ model OrderItem {
 
   order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product      Product  @relation(fields: [productId], references: [id])
+}
+
+model OrderEvent {
+  id        Int      @id @default(autoincrement())
+  orderId   Int
+  type      String
+  message   String?
+  createdAt DateTime @default(now())
+
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
