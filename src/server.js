@@ -1,44 +1,135 @@
 import express from "express";
 import { PrismaClient } from "@prisma/client";
 import cors from "cors";
+import dotenv from "dotenv";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+
+dotenv.config();
 
 const prisma = new PrismaClient();
 const app = express();
 
 app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 8080;
+const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME_IN_RAILWAY";
+const SETUP_SECRET = process.env.SETUP_SECRET || "";
 const VAT_RATE = Number(process.env.VAT_RATE || 0.13);
 
-function sendError(res, error) {
+function sendError(res, error, status = 500) {
   console.error(error);
-  res.status(500).json({ ok: false, error: error.message || "Internal Server Error" });
+  res.status(status).json({
+    ok: false,
+    error: error.message || "Internal Server Error"
+  });
 }
 
-function orderInclude() {
+function publicUser(user) {
+  if (!user) return null;
   return {
-    yacht: true,
-    items: { include: { product: true } },
-    events: { orderBy: { createdAt: "asc" } }
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    active: user.active
   };
+}
+
+function signToken(user) {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role
+    },
+    JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+}
+
+async function auth(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "Missing auth token" });
+    }
+
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = await prisma.user.findUnique({ where: { id: Number(payload.id) } });
+
+    if (!user || !user.active) {
+      return res.status(401).json({ ok: false, error: "Invalid or inactive user" });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    return res.status(401).json({ ok: false, error: "Invalid auth token" });
+  }
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ ok: false, error: "Insufficient permissions" });
+    }
+    next();
+  };
+}
+
+async function audit(req, action, entity, entityId, metadata = {}) {
+  try {
+    await prisma.auditEvent.create({
+      data: {
+        userId: req.user?.id || null,
+        action,
+        entity,
+        entityId: entityId ? String(entityId) : null,
+        metadata: JSON.stringify(metadata)
+      }
+    });
+  } catch (error) {
+    console.error("Audit failed:", error);
+  }
+}
+
+async function orderEvent(orderId, status, message, createdBy) {
+  try {
+    await prisma.orderEvent.create({
+      data: {
+        orderId: Number(orderId),
+        status,
+        message: message || null,
+        createdBy: createdBy || null
+      }
+    });
+  } catch (error) {
+    console.error("Order event failed:", error);
+  }
 }
 
 function calculateTotals(items) {
   const subtotal = items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0);
   const vat = Number((subtotal * VAT_RATE).toFixed(2));
   const total = Number((subtotal + vat).toFixed(2));
-  return { subtotal: Number(subtotal.toFixed(2)), vat, total };
-}
 
-async function createEvent(tx, orderId, type, message) {
-  return tx.orderEvent.create({
-    data: { orderId: Number(orderId), type, message: message || null }
-  });
+  return {
+    subtotal: Number(subtotal.toFixed(2)),
+    vat,
+    total
+  };
 }
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, app: "YachtFlow API", version: "ops-whatsapp-ticket" });
+  res.json({
+    ok: true,
+    app: "YachtFlow API",
+    version: "2.0.0"
+  });
 });
 
 app.get("/health", async (req, res) => {
@@ -50,18 +141,139 @@ app.get("/health", async (req, res) => {
   }
 });
 
-app.get("/yachts", async (req, res) => {
+app.post("/auth/setup-admin", async (req, res) => {
   try {
-    const yachts = await prisma.yacht.findMany({ orderBy: { createdAt: "desc" } });
+    const existingUsers = await prisma.user.count();
+
+    if (existingUsers > 0) {
+      return res.status(409).json({ ok: false, error: "Admin already exists" });
+    }
+
+    if (!SETUP_SECRET) {
+      return res.status(500).json({
+        ok: false,
+        error: "SETUP_SECRET is missing in Railway variables"
+      });
+    }
+
+    if (req.body.setupSecret !== SETUP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Invalid setup secret" });
+    }
+
+    if (!req.body.email || !req.body.password || !req.body.name) {
+      return res.status(400).json({ ok: false, error: "name, email and password are required" });
+    }
+
+    const passwordHash = await bcrypt.hash(req.body.password, 10);
+
+    const user = await prisma.user.create({
+      data: {
+        name: req.body.name,
+        email: req.body.email.toLowerCase().trim(),
+        passwordHash,
+        role: "admin",
+        active: true
+      }
+    });
+
+    const token = signToken(user);
+
+    res.status(201).json({
+      ok: true,
+      user: publicUser(user),
+      token
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/auth/login", async (req, res) => {
+  try {
+    const email = String(req.body.email || "").toLowerCase().trim();
+    const password = String(req.body.password || "");
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    if (!user || !user.active) {
+      return res.status(401).json({ ok: false, error: "Invalid login" });
+    }
+
+    const valid = await bcrypt.compare(password, user.passwordHash);
+
+    if (!valid) {
+      return res.status(401).json({ ok: false, error: "Invalid login" });
+    }
+
+    await audit({ user }, "login", "User", user.id);
+
+    res.json({
+      ok: true,
+      user: publicUser(user),
+      token: signToken(user)
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.get("/auth/me", auth, async (req, res) => {
+  res.json({
+    ok: true,
+    user: publicUser(req.user)
+  });
+});
+
+app.get("/users", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      orderBy: { createdAt: "desc" }
+    });
+    res.json(users.map(publicUser));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/users", auth, requireRole("admin"), async (req, res) => {
+  try {
+    if (!req.body.email || !req.body.password || !req.body.name) {
+      return res.status(400).json({ ok: false, error: "name, email and password are required" });
+    }
+
+    const passwordHash = await bcrypt.hash(req.body.password, 10);
+
+    const user = await prisma.user.create({
+      data: {
+        name: req.body.name,
+        email: req.body.email.toLowerCase().trim(),
+        passwordHash,
+        role: req.body.role || "ops",
+        active: true
+      }
+    });
+
+    await audit(req, "create_user", "User", user.id, { role: user.role });
+
+    res.status(201).json(publicUser(user));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.get("/yachts", auth, async (req, res) => {
+  try {
+    const yachts = await prisma.yacht.findMany({
+      orderBy: { createdAt: "desc" }
+    });
     res.json(yachts);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.post("/yachts", async (req, res) => {
+app.post("/yachts", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
-    if (!req.body.name) return res.status(400).json({ ok: false, error: "name is required" });
     const yacht = await prisma.yacht.create({
       data: {
         name: req.body.name,
@@ -72,89 +284,107 @@ app.post("/yachts", async (req, res) => {
         notes: req.body.notes || null
       }
     });
+
+    await audit(req, "create_yacht", "Yacht", yacht.id, { name: yacht.name });
+
     res.status(201).json(yacht);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.get("/products", async (req, res) => {
+app.get("/products", auth, async (req, res) => {
   try {
-    const products = await prisma.product.findMany({ orderBy: [{ category: "asc" }, { name: "asc" }] });
+    const products = await prisma.product.findMany({
+      where: { active: true },
+      orderBy: [{ category: "asc" }, { name: "asc" }]
+    });
     res.json(products);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.post("/products", async (req, res) => {
+app.post("/products", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
-    if (!req.body.name) return res.status(400).json({ ok: false, error: "name is required" });
     const product = await prisma.product.create({
       data: {
         name: req.body.name,
         category: req.body.category || null,
         unit: req.body.unit || null,
         price: null,
-        notes: req.body.notes || null
+        notes: req.body.notes || null,
+        active: true
       }
     });
+
+    await audit(req, "create_product", "Product", product.id, { name: product.name });
+
     res.status(201).json(product);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.get("/orders", async (req, res) => {
+app.get("/orders", auth, async (req, res) => {
   try {
-    const orders = await prisma.order.findMany({ include: orderInclude(), orderBy: { createdAt: "desc" } });
+    const orders = await prisma.order.findMany({
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      },
+      orderBy: { createdAt: "desc" }
+    });
     res.json(orders);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.get("/orders/:id", async (req, res) => {
-  try {
-    const order = await prisma.order.findUnique({ where: { id: Number(req.params.id) }, include: orderInclude() });
-    if (!order) return res.status(404).json({ ok: false, error: "Order not found" });
-    res.json(order);
-  } catch (error) {
-    sendError(res, error);
-  }
-});
-
-app.post("/orders", async (req, res) => {
+app.post("/orders", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const items = Array.isArray(req.body.items) ? req.body.items : [];
-    if (!req.body.yachtId) return res.status(400).json({ ok: false, error: "yachtId is required" });
-    if (items.length === 0) return res.status(400).json({ ok: false, error: "At least one order item is required" });
 
-    const order = await prisma.$transaction(async (tx) => {
-      const created = await tx.order.create({
-        data: {
-          yachtId: Number(req.body.yachtId),
-          status: req.body.status || "confirmed",
-          deliveryAt: req.body.deliveryAt ? new Date(req.body.deliveryAt) : null,
-          notes: req.body.notes || null,
-          subtotal: null,
-          vat: null,
-          total: null,
-          paymentStatus: "pending",
-          ticketSent: false,
-          items: {
-            create: items.map((item) => ({
-              productId: Number(item.productId),
-              quantity: Number(item.quantity),
-              notes: item.notes || null
-            }))
+    if (!req.body.yachtId) {
+      return res.status(400).json({ ok: false, error: "yachtId is required" });
+    }
+
+    if (items.length === 0) {
+      return res.status(400).json({ ok: false, error: "At least one order item is required" });
+    }
+
+    const order = await prisma.order.create({
+      data: {
+        yachtId: Number(req.body.yachtId),
+        status: req.body.status || "confirmed",
+        deliveryAt: req.body.deliveryAt ? new Date(req.body.deliveryAt) : null,
+        notes: req.body.notes || null,
+        paymentStatus: "pending",
+        ticketSent: false,
+        items: {
+          create: items.map((item) => ({
+            productId: Number(item.productId),
+            quantity: Number(item.quantity),
+            notes: item.notes || null
+          }))
+        },
+        events: {
+          create: {
+            status: req.body.status || "confirmed",
+            message: "Order created",
+            createdBy: req.user.name
           }
         }
-      });
-      await createEvent(tx, created.id, "order_created", "Order created");
-      await createEvent(tx, created.id, `status_${created.status}`, `Status set to ${created.status}`);
-      return tx.order.findUnique({ where: { id: created.id }, include: orderInclude() });
+      },
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      }
     });
+
+    await audit(req, "create_order", "Order", order.id, { yachtId: order.yachtId });
 
     res.status(201).json(order);
   } catch (error) {
@@ -162,66 +392,107 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-app.patch("/orders/:id/status", async (req, res) => {
+app.patch("/orders/:id/status", auth, requireRole("admin", "ops", "driver"), async (req, res) => {
   try {
     const status = req.body.status;
-    if (!status) return res.status(400).json({ ok: false, error: "status is required" });
 
-    const order = await prisma.$transaction(async (tx) => {
-      await tx.order.update({
-        where: { id: Number(req.params.id) },
-        data: {
-          status,
-          completedAt: status === "delivered" ? new Date() : undefined
-        }
+    if (req.user.role === "driver" && !["out_for_delivery", "delivered"].includes(status)) {
+      return res.status(403).json({
+        ok: false,
+        error: "Driver can only set out_for_delivery or delivered"
       });
-      await createEvent(tx, Number(req.params.id), `status_${status}`, `Status changed to ${status}`);
-      return tx.order.findUnique({ where: { id: Number(req.params.id) }, include: orderInclude() });
+    }
+
+    const order = await prisma.order.update({
+      where: { id: Number(req.params.id) },
+      data: {
+        status,
+        completedAt: status === "delivered" ? new Date() : undefined
+      },
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      }
     });
 
-    res.json(order);
+    await orderEvent(order.id, status, `Status changed to ${status}`, req.user.name);
+    await audit(req, "update_order_status", "Order", order.id, { status });
+
+    const fullOrder = await prisma.order.findUnique({
+      where: { id: order.id },
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      }
+    });
+
+    res.json(fullOrder);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.patch("/orders/:id/prepare", async (req, res) => {
+app.patch("/orders/:id/prepare", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const inputItems = Array.isArray(req.body.items) ? req.body.items : [];
-    if (inputItems.length === 0) return res.status(400).json({ ok: false, error: "items are required" });
 
     const preparedItems = inputItems.map((item) => {
       const actualWeight = Number(item.actualWeight || 0);
       const customPrice = Number(item.customPrice || 0);
       const lineTotal = Number((actualWeight * customPrice).toFixed(2));
-      return { id: Number(item.id), actualWeight, customPrice, lineTotal };
+
+      return {
+        id: Number(item.id),
+        actualWeight,
+        customPrice,
+        lineTotal
+      };
     });
+
+    if (preparedItems.some((item) => !item.id || !item.actualWeight || !item.customPrice)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Every item needs id, actualWeight and customPrice"
+      });
+    }
 
     const totals = calculateTotals(preparedItems);
 
-    const order = await prisma.$transaction(async (tx) => {
-      for (const item of preparedItems) {
-        await tx.orderItem.update({
+    await Promise.all(
+      preparedItems.map((item) =>
+        prisma.orderItem.update({
           where: { id: item.id },
           data: {
             actualWeight: item.actualWeight,
             customPrice: item.customPrice,
             lineTotal: item.lineTotal
           }
-        });
+        })
+      )
+    );
+
+    await prisma.order.update({
+      where: { id: Number(req.params.id) },
+      data: {
+        subtotal: totals.subtotal,
+        vat: totals.vat,
+        total: totals.total,
+        status: "ready"
       }
-      await tx.order.update({
-        where: { id: Number(req.params.id) },
-        data: {
-          subtotal: totals.subtotal,
-          vat: totals.vat,
-          total: totals.total,
-          status: "ready"
-        }
-      });
-      await createEvent(tx, Number(req.params.id), "prepared", `Order prepared. Total EUR ${totals.total}`);
-      await createEvent(tx, Number(req.params.id), "status_ready", "Status changed to ready");
-      return tx.order.findUnique({ where: { id: Number(req.params.id) }, include: orderInclude() });
+    });
+
+    await orderEvent(req.params.id, "ready", `Order prepared. Total €${totals.total}`, req.user.name);
+    await audit(req, "prepare_order", "Order", req.params.id, totals);
+
+    const order = await prisma.order.findUnique({
+      where: { id: Number(req.params.id) },
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      }
     });
 
     res.json(order);
@@ -230,38 +501,66 @@ app.patch("/orders/:id/prepare", async (req, res) => {
   }
 });
 
-app.patch("/orders/:id/payment", async (req, res) => {
+app.patch("/orders/:id/payment", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const paymentStatus = req.body.paymentStatus || "paid";
-    const order = await prisma.$transaction(async (tx) => {
-      await tx.order.update({ where: { id: Number(req.params.id) }, data: { paymentStatus } });
-      await createEvent(tx, Number(req.params.id), `payment_${paymentStatus}`, `Payment status changed to ${paymentStatus}`);
-      return tx.order.findUnique({ where: { id: Number(req.params.id) }, include: orderInclude() });
+
+    await prisma.order.update({
+      where: { id: Number(req.params.id) },
+      data: { paymentStatus }
     });
+
+    await orderEvent(req.params.id, paymentStatus, `Payment status: ${paymentStatus}`, req.user.name);
+    await audit(req, "update_payment", "Order", req.params.id, { paymentStatus });
+
+    const order = await prisma.order.findUnique({
+      where: { id: Number(req.params.id) },
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      }
+    });
+
     res.json(order);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.patch("/orders/:id/ticket-sent", async (req, res) => {
+app.patch("/orders/:id/ticket-sent", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
-    const order = await prisma.$transaction(async (tx) => {
-      await tx.order.update({ where: { id: Number(req.params.id) }, data: { ticketSent: true } });
-      await createEvent(tx, Number(req.params.id), "whatsapp_ticket_sent", "WhatsApp payment ticket sent");
-      return tx.order.findUnique({ where: { id: Number(req.params.id) }, include: orderInclude() });
+    await prisma.order.update({
+      where: { id: Number(req.params.id) },
+      data: { ticketSent: true }
     });
+
+    await orderEvent(req.params.id, "ticket_sent", "WhatsApp payment ticket sent", req.user.name);
+    await audit(req, "ticket_sent", "Order", req.params.id);
+
+    const order = await prisma.order.findUnique({
+      where: { id: Number(req.params.id) },
+      include: {
+        yacht: true,
+        items: { include: { product: true } },
+        events: { orderBy: { createdAt: "asc" } }
+      }
+    });
+
     res.json(order);
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.get("/analytics/revenue", async (req, res) => {
+app.get("/analytics/revenue", auth, requireRole("admin", "ops"), async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
       where: { total: { not: null } },
-      include: { yacht: true, items: { include: { product: true } } }
+      include: {
+        yacht: true,
+        items: { include: { product: true } }
+      }
     });
 
     const now = new Date();
@@ -270,24 +569,38 @@ app.get("/analytics/revenue", async (req, res) => {
     startOfWeek.setDate(startOfToday.getDate() - 7);
 
     const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
-    const todayRevenue = orders.filter((order) => new Date(order.updatedAt) >= startOfToday).reduce((sum, order) => sum + Number(order.total || 0), 0);
-    const weekRevenue = orders.filter((order) => new Date(order.updatedAt) >= startOfWeek).reduce((sum, order) => sum + Number(order.total || 0), 0);
-    const outstanding = orders.filter((order) => order.paymentStatus !== "paid").reduce((sum, order) => sum + Number(order.total || 0), 0);
+    const todayRevenue = orders
+      .filter((order) => new Date(order.updatedAt) >= startOfToday)
+      .reduce((sum, order) => sum + Number(order.total || 0), 0);
+    const weekRevenue = orders
+      .filter((order) => new Date(order.updatedAt) >= startOfWeek)
+      .reduce((sum, order) => sum + Number(order.total || 0), 0);
+    const outstanding = orders
+      .filter((order) => order.paymentStatus !== "paid")
+      .reduce((sum, order) => sum + Number(order.total || 0), 0);
 
-    const yachtTotals = {};
-    const productTotals = {};
+    const yachtRevenue = {};
+    const productRevenue = {};
 
     for (const order of orders) {
       const yachtName = order.yacht?.name || "Unknown";
-      yachtTotals[yachtName] = (yachtTotals[yachtName] || 0) + Number(order.total || 0);
+      yachtRevenue[yachtName] = (yachtRevenue[yachtName] || 0) + Number(order.total || 0);
+
       for (const item of order.items || []) {
         const productName = item.product?.name || "Unknown";
-        productTotals[productName] = (productTotals[productName] || 0) + Number(item.lineTotal || 0);
+        productRevenue[productName] = (productRevenue[productName] || 0) + Number(item.lineTotal || 0);
       }
     }
 
-    const topYachts = Object.entries(yachtTotals).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, total]) => ({ name, total: Number(total.toFixed(2)) }));
-    const topProducts = Object.entries(productTotals).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, total]) => ({ name, total: Number(total.toFixed(2)) }));
+    const topYachts = Object.entries(yachtRevenue)
+      .map(([name, value]) => ({ name, value: Number(value.toFixed(2)) }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+
+    const topProducts = Object.entries(productRevenue)
+      .map(([name, value]) => ({ name, value: Number(value.toFixed(2)) }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
 
     res.json({
       totalRevenue: Number(totalRevenue.toFixed(2)),
@@ -298,6 +611,23 @@ app.get("/analytics/revenue", async (req, res) => {
       topYachts,
       topProducts
     });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.get("/audit", auth, requireRole("admin"), async (req, res) => {
+  try {
+    const events = await prisma.auditEvent.findMany({
+      include: { user: true },
+      orderBy: { createdAt: "desc" },
+      take: 100
+    });
+
+    res.json(events.map((event) => ({
+      ...event,
+      user: publicUser(event.user)
+    })));
   } catch (error) {
     sendError(res, error);
   }
