@@ -93,7 +93,7 @@ model OrderItem {
 model OrderEvent {
   id        Int      @id @default(autoincrement())
   orderId   Int
-  status    String
+  status    String   @default("event")
   message   String?
   createdBy String?
   createdAt DateTime @default(now())
