@@ -39,11 +39,7 @@ function publicUser(user) {
 
 function signToken(user) {
   return jwt.sign(
-    {
-      id: user.id,
-      email: user.email,
-      role: user.role
-    },
+    { id: user.id, email: user.email, role: user.role },
     JWT_SECRET,
     { expiresIn: "7d" }
   );
@@ -54,9 +50,7 @@ async function auth(req, res, next) {
     const header = req.headers.authorization || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
 
-    if (!token) {
-      return res.status(401).json({ ok: false, error: "Missing auth token" });
-    }
+    if (!token) return res.status(401).json({ ok: false, error: "Missing auth token" });
 
     const payload = jwt.verify(token, JWT_SECRET);
     const user = await prisma.user.findUnique({ where: { id: Number(payload.id) } });
@@ -124,12 +118,16 @@ function calculateTotals(items) {
   };
 }
 
+function orderInclude() {
+  return {
+    yacht: true,
+    items: { include: { product: true } },
+    events: { orderBy: { createdAt: "asc" } }
+  };
+}
+
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    app: "YachtFlow API",
-    version: "2.0.0"
-  });
+  res.json({ ok: true, app: "YachtFlow API", version: "2.1.0" });
 });
 
 app.get("/health", async (req, res) => {
@@ -150,10 +148,7 @@ app.post("/auth/setup-admin", async (req, res) => {
     }
 
     if (!SETUP_SECRET) {
-      return res.status(500).json({
-        ok: false,
-        error: "SETUP_SECRET is missing in Railway variables"
-      });
+      return res.status(500).json({ ok: false, error: "SETUP_SECRET is missing in Railway variables" });
     }
 
     if (req.body.setupSecret !== SETUP_SECRET) {
@@ -176,13 +171,7 @@ app.post("/auth/setup-admin", async (req, res) => {
       }
     });
 
-    const token = signToken(user);
-
-    res.status(201).json({
-      ok: true,
-      user: publicUser(user),
-      token
-    });
+    res.status(201).json({ ok: true, user: publicUser(user), token: signToken(user) });
   } catch (error) {
     sendError(res, error);
   }
@@ -201,34 +190,23 @@ app.post("/auth/login", async (req, res) => {
 
     const valid = await bcrypt.compare(password, user.passwordHash);
 
-    if (!valid) {
-      return res.status(401).json({ ok: false, error: "Invalid login" });
-    }
+    if (!valid) return res.status(401).json({ ok: false, error: "Invalid login" });
 
     await audit({ user }, "login", "User", user.id);
 
-    res.json({
-      ok: true,
-      user: publicUser(user),
-      token: signToken(user)
-    });
+    res.json({ ok: true, user: publicUser(user), token: signToken(user) });
   } catch (error) {
     sendError(res, error);
   }
 });
 
 app.get("/auth/me", auth, async (req, res) => {
-  res.json({
-    ok: true,
-    user: publicUser(req.user)
-  });
+  res.json({ ok: true, user: publicUser(req.user) });
 });
 
 app.get("/users", auth, requireRole("admin"), async (req, res) => {
   try {
-    const users = await prisma.user.findMany({
-      orderBy: { createdAt: "desc" }
-    });
+    const users = await prisma.user.findMany({ orderBy: { createdAt: "desc" } });
     res.json(users.map(publicUser));
   } catch (error) {
     sendError(res, error);
@@ -254,7 +232,6 @@ app.post("/users", auth, requireRole("admin"), async (req, res) => {
     });
 
     await audit(req, "create_user", "User", user.id, { role: user.role });
-
     res.status(201).json(publicUser(user));
   } catch (error) {
     sendError(res, error);
@@ -263,9 +240,7 @@ app.post("/users", auth, requireRole("admin"), async (req, res) => {
 
 app.get("/yachts", auth, async (req, res) => {
   try {
-    const yachts = await prisma.yacht.findMany({
-      orderBy: { createdAt: "desc" }
-    });
+    const yachts = await prisma.yacht.findMany({ orderBy: { createdAt: "desc" } });
     res.json(yachts);
   } catch (error) {
     sendError(res, error);
@@ -286,8 +261,28 @@ app.post("/yachts", auth, requireRole("admin", "ops"), async (req, res) => {
     });
 
     await audit(req, "create_yacht", "Yacht", yacht.id, { name: yacht.name });
-
     res.status(201).json(yacht);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.patch("/yachts/:id", auth, requireRole("admin", "ops"), async (req, res) => {
+  try {
+    const yacht = await prisma.yacht.update({
+      where: { id: Number(req.params.id) },
+      data: {
+        name: req.body.name,
+        marina: req.body.marina || null,
+        berth: req.body.berth || null,
+        chefName: req.body.chefName || null,
+        phone: req.body.phone || null,
+        notes: req.body.notes || null
+      }
+    });
+
+    await audit(req, "update_yacht", "Yacht", yacht.id, { name: yacht.name });
+    res.json(yacht);
   } catch (error) {
     sendError(res, error);
   }
@@ -319,7 +314,6 @@ app.post("/products", auth, requireRole("admin", "ops"), async (req, res) => {
     });
 
     await audit(req, "create_product", "Product", product.id, { name: product.name });
-
     res.status(201).json(product);
   } catch (error) {
     sendError(res, error);
@@ -329,11 +323,7 @@ app.post("/products", auth, requireRole("admin", "ops"), async (req, res) => {
 app.get("/orders", auth, async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
-      },
+      include: orderInclude(),
       orderBy: { createdAt: "desc" }
     });
     res.json(orders);
@@ -354,12 +344,26 @@ app.post("/orders", auth, requireRole("admin", "ops"), async (req, res) => {
       return res.status(400).json({ ok: false, error: "At least one order item is required" });
     }
 
+    const yacht = await prisma.yacht.findUnique({ where: { id: Number(req.body.yachtId) } });
+
+    if (!yacht) {
+      return res.status(404).json({ ok: false, error: "Yacht not found" });
+    }
+
     const order = await prisma.order.create({
       data: {
         yachtId: Number(req.body.yachtId),
         status: req.body.status || "confirmed",
         deliveryAt: req.body.deliveryAt ? new Date(req.body.deliveryAt) : null,
         notes: req.body.notes || null,
+
+        contactName: req.body.contactName || yacht.chefName || null,
+        contactPhone: req.body.contactPhone || yacht.phone || null,
+        deliveryLocation: req.body.deliveryLocation || yacht.marina || null,
+        deliveryBerth: req.body.deliveryBerth || yacht.berth || null,
+        deliveryMapUrl: req.body.deliveryMapUrl || null,
+        deliveryNotes: req.body.deliveryNotes || null,
+
         paymentStatus: "pending",
         ticketSent: false,
         items: {
@@ -377,16 +381,45 @@ app.post("/orders", auth, requireRole("admin", "ops"), async (req, res) => {
           }
         }
       },
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
-      }
+      include: orderInclude()
     });
 
     await audit(req, "create_order", "Order", order.id, { yachtId: order.yachtId });
-
     res.status(201).json(order);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.patch("/orders/:id/delivery", auth, requireRole("admin", "ops", "driver"), async (req, res) => {
+  try {
+    const order = await prisma.order.update({
+      where: { id: Number(req.params.id) },
+      data: {
+        contactName: req.body.contactName || null,
+        contactPhone: req.body.contactPhone || null,
+        deliveryLocation: req.body.deliveryLocation || null,
+        deliveryBerth: req.body.deliveryBerth || null,
+        deliveryMapUrl: req.body.deliveryMapUrl || null,
+        deliveryNotes: req.body.deliveryNotes || null
+      },
+      include: orderInclude()
+    });
+
+    await orderEvent(order.id, "delivery_updated", "Delivery contact/location updated", req.user.name);
+    await audit(req, "update_order_delivery", "Order", order.id, {
+      contactName: order.contactName,
+      contactPhone: order.contactPhone,
+      deliveryLocation: order.deliveryLocation,
+      deliveryBerth: order.deliveryBerth
+    });
+
+    const fullOrder = await prisma.order.findUnique({
+      where: { id: order.id },
+      include: orderInclude()
+    });
+
+    res.json(fullOrder);
   } catch (error) {
     sendError(res, error);
   }
@@ -403,29 +436,20 @@ app.patch("/orders/:id/status", auth, requireRole("admin", "ops", "driver"), asy
       });
     }
 
-    const order = await prisma.order.update({
+    await prisma.order.update({
       where: { id: Number(req.params.id) },
       data: {
         status,
         completedAt: status === "delivered" ? new Date() : undefined
-      },
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
       }
     });
 
-    await orderEvent(order.id, status, `Status changed to ${status}`, req.user.name);
-    await audit(req, "update_order_status", "Order", order.id, { status });
+    await orderEvent(req.params.id, status, `Status changed to ${status}`, req.user.name);
+    await audit(req, "update_order_status", "Order", req.params.id, { status });
 
     const fullOrder = await prisma.order.findUnique({
-      where: { id: order.id },
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
-      }
+      where: { id: Number(req.params.id) },
+      include: orderInclude()
     });
 
     res.json(fullOrder);
@@ -488,11 +512,7 @@ app.patch("/orders/:id/prepare", auth, requireRole("admin", "ops"), async (req, 
 
     const order = await prisma.order.findUnique({
       where: { id: Number(req.params.id) },
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
-      }
+      include: orderInclude()
     });
 
     res.json(order);
@@ -515,11 +535,7 @@ app.patch("/orders/:id/payment", auth, requireRole("admin", "ops"), async (req, 
 
     const order = await prisma.order.findUnique({
       where: { id: Number(req.params.id) },
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
-      }
+      include: orderInclude()
     });
 
     res.json(order);
@@ -540,11 +556,7 @@ app.patch("/orders/:id/ticket-sent", auth, requireRole("admin", "ops"), async (r
 
     const order = await prisma.order.findUnique({
       where: { id: Number(req.params.id) },
-      include: {
-        yacht: true,
-        items: { include: { product: true } },
-        events: { orderBy: { createdAt: "asc" } }
-      }
+      include: orderInclude()
     });
 
     res.json(order);
@@ -624,10 +636,7 @@ app.get("/audit", auth, requireRole("admin"), async (req, res) => {
       take: 100
     });
 
-    res.json(events.map((event) => ({
-      ...event,
-      user: publicUser(event.user)
-    })));
+    res.json(events.map((event) => ({ ...event, user: publicUser(event.user) })));
   } catch (error) {
     sendError(res, error);
   }
