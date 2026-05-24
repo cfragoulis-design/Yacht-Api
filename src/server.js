@@ -59,12 +59,12 @@ app.get("/seed", async (req, res) => {
         {
           name: "M/Y Serenity",
           marina: "Gouvia Marina",
-          captain: "John Carter",
+          chefName: "John Carter"
         },
         {
           name: "M/Y Blue Ocean",
           marina: "Mykonos Marina",
-          captain: "Marco Bellini",
+          chefName: "Marco Bellini"
         },
       ],
       skipDuplicates: true,
